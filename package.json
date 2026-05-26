@@ -1,0 +1,125 @@
+{
+  "name": "codewhale-vscode",
+  "displayName": "CodeWhale",
+  "description": "CodeWhale AI coding agent — VSCode frontend",
+  "version": "0.1.0",
+  "publisher": "codewhale",
+  "license": "MIT",
+  "icon": "assets/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codewhale/codewhale-vscode"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "ai",
+    "coding",
+    "agent",
+    "chat",
+    "deepseek",
+    "codewhale"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codewhale.openPanel",
+        "title": "CodeWhale: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "codewhale.newThread",
+        "title": "CodeWhale: New Conversation"
+      },
+      {
+        "command": "codewhale.toggleApprovalMode",
+        "title": "CodeWhale: Toggle Approval Mode"
+      },
+      {
+        "command": "codewhale.showSettings",
+        "title": "CodeWhale: Open Settings"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "codewhale.openPanel",
+          "when": "true"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "codewhale.openPanel",
+          "group": "navigation",
+          "when": "true"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "codewhale.openPanel",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l"
+      },
+      {
+        "command": "codewhale.newThread",
+        "key": "ctrl+shift+n",
+        "mac": "cmd+shift+n"
+      }
+    ],
+    "configuration": {
+      "title": "CodeWhale",
+      "properties": {
+        "codewhale.binaryVersion": {
+          "type": "string",
+          "default": "v0.8.44",
+          "description": "Pinned version of codewhale-tui binary to download from GitHub Releases"
+        },
+        "codewhale.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom path to codewhale-tui binary (overrides auto-download)"
+        },
+        "codewhale.defaultMode": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "agent",
+            "yolo"
+          ],
+          "default": "agent",
+          "description": "Default approval mode for new threads"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build:webview && npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build:webview": "node esbuild.config.mjs",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
+  }
+}

@@ -1,0 +1,44 @@
+name: CI & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run build:webview
+
+      - run: npm run compile
+
+      - name: Run tests
+        run: |
+          node out/harness/client.test.js
+          node out/harness/diff.test.js
+
+      - name: Package VSIX
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: npx --yes @vscode/vsce package --out "codewhale-${{ github.ref_name }}.vsix"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: "*.vsix"
+          generate_release_notes: true
