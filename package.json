@@ -1,9 +1,9 @@
 {
   "name": "codewhale-vscode",
-  "displayName": "CodeWhale",
+  "displayName": "CodeWhale AI",
   "description": "CodeWhale AI coding agent — VSCode frontend",
-  "version": "0.1.0",
-  "publisher": "codewhale",
+  "version": "0.1.1",
+  "publisher": "HaiTaoJiang",
   "license": "MIT",
   "icon": "assets/icon.png",
   "repository": {

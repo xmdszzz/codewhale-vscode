@@ -4,3 +4,10 @@ src/**
 tsconfig.json
 esbuild.config.mjs
 .gitignore
+AGENTS.md
+CONTEXT.md
+test_guide.md
+docs/**
+.github/**
+assets/icon.svg
+media/**
