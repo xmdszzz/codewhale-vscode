@@ -2,7 +2,8 @@ import * as vscode from "vscode";
 import * as fs from "node:fs";
 import { CodewhaleClient } from "../harness/client";
 import { SseEventEnvelope } from "../harness/types";
-import { ThreadSummary } from "../harness/types";
+import * as os from "node:os";
+import * as cp from "node:child_process";
 
 /**
  * WebviewViewProvider that manages the CodeWhale chat panel.
@@ -89,7 +90,7 @@ export class ChatPanelProvider {
   }
 
   /** Forward reconnection success to the webview, and re-establish SSE if needed. */
-  onReconnected(p: { port: number }) {
+  onReconnected(_p: { port: number }) {
     this._postToWebview({
       type: "connectionState",
       state: "connected",
@@ -323,7 +324,7 @@ export class ChatPanelProvider {
         try {
           await client.deleteThread(threadId);
           console.log("[CodeWhale] deleteThread: HTTP API succeeded");
-        } catch (e) {
+        } catch {
           console.log("[CodeWhale] deleteThread: HTTP API failed, trying filesystem...");
           // Strategy 2: Try to find thread on disk
           try {
@@ -336,7 +337,7 @@ export class ChatPanelProvider {
               candidates.push(`${ws}/.codewhale/threads/${threadId}`);
               candidates.push(`${ws}/.codewhale/sessions/${threadId}`);
             }
-            const homedir = require("node:os").homedir();
+            const homedir = os.homedir();
             candidates.push(`${homedir}/.codewhale/threads/${threadId}`);
             candidates.push(`${homedir}/.codewhale/sessions/${threadId}`);
             candidates.push(`${homedir}/.config/codewhale/threads/${threadId}`);
@@ -353,7 +354,6 @@ export class ChatPanelProvider {
           // Strategy 3: CLI binary
           if (this._binaryPath) {
             try {
-              const cp = require("node:child_process") as typeof import("node:child_process");
               cp.execFileSync(this._binaryPath, ["thread", "delete", threadId], { timeout: 10_000, stdio: "pipe" });
               console.log("[CodeWhale] deleteThread: CLI succeeded");
             } catch {

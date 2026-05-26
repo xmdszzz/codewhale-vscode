@@ -154,7 +154,7 @@ export class BinaryDownloader extends EventEmitter {
       // Catch write-stream errors (disk full, permission denied, etc.)
       file.on("error", (err) => {
         file.close();
-        try { fs.unlinkSync(dest); } catch {}
+        try { fs.unlinkSync(dest); } catch { /* best-effort */ }
         reject(err);
       });
 
@@ -166,14 +166,14 @@ export class BinaryDownloader extends EventEmitter {
           // Handle redirects
           if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
             file.close();
-            try { fs.unlinkSync(dest); } catch {}
+            try { fs.unlinkSync(dest); } catch { /* best-effort */ }
             this._downloadFile(res.headers.location, dest, totalSize).then(resolve, reject);
             return;
           }
 
           if (res.statusCode !== 200) {
             file.close();
-            try { fs.unlinkSync(dest); } catch {}
+            try { fs.unlinkSync(dest); } catch { /* best-effort */ }
             reject(
               new Error(`Download failed with status ${res.statusCode}`)
             );
@@ -203,7 +203,7 @@ export class BinaryDownloader extends EventEmitter {
 
           res.on("error", (err) => {
             file.close();
-            try { fs.unlinkSync(dest); } catch {}
+            try { fs.unlinkSync(dest); } catch { /* best-effort */ }
             reject(err);
           });
         }
@@ -211,7 +211,7 @@ export class BinaryDownloader extends EventEmitter {
 
       req.on("error", (err) => {
         file.close();
-        try { fs.unlinkSync(dest); } catch {}
+        try { fs.unlinkSync(dest); } catch { /* best-effort */ }
         reject(err);
       });
 

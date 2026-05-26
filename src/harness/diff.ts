@@ -71,8 +71,6 @@ export function parseUnifiedDiff(text: string): ParsedDiff | null {
         line.startsWith(" ")
       ) {
         currentHunk.push(line);
-      } else if (trimmed === "") {
-        currentHunk.push(line);
       }
       // Otherwise it's a summary line like "Wrote 42 bytes..." — end of diff
     }
@@ -127,7 +125,6 @@ export function reverseApply(newContent: string, diff: ParsedDiff): string {
 
     // Process hunk: skip '+' lines (new-only), add '-' lines (old-only),
     // keep context lines (prefixed with " ")
-    let hunkNewOffset = 0;
     for (const hunkLine of hunk.lines) {
       const prefix = hunkLine[0];
       const content = hunkLine.slice(1);
@@ -135,7 +132,6 @@ export function reverseApply(newContent: string, diff: ParsedDiff): string {
       if (prefix === "+") {
         // Added in new version — skip in old
         newIdx++; // consume from newLines
-        hunkNewOffset++;
       } else if (prefix === "-") {
         // Removed in new version — restore in old
         result.push(content);
@@ -143,7 +139,6 @@ export function reverseApply(newContent: string, diff: ParsedDiff): string {
         // Context line — present in both
         result.push(content);
         newIdx++;
-        hunkNewOffset++;
       }
       // Ignore other prefixes (empty lines, "\ No newline", etc.)
     }

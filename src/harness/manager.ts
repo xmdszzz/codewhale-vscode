@@ -1,5 +1,5 @@
 import * as cp from "node:child_process";
-import * as os from "node:os";
+import * as http from "node:http";
 import * as net from "node:net";
 import { EventEmitter } from "node:events";
 import { CodewhaleClient } from "./client";
@@ -222,7 +222,7 @@ export class CodewhaleManager extends EventEmitter {
 
     // Try graceful HTTP shutdown
     try {
-      require("node:http").request(
+      http.request(
         `http://127.0.0.1:${this.port}/shutdown`,
         { method: "POST" },
         () => {}

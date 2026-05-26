@@ -1,5 +1,5 @@
 import * as http from "node:http";
-import * as https from "node:https";
+import * as cp from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   HealthResponse,
@@ -254,9 +254,8 @@ export class CodewhaleClient extends EventEmitter {
  * `binaryPath` must point to the codewhale-tui executable.
  */
 export function fetchModelsFromCli(binaryPath: string): Promise<ModelEntry[]> {
-  const { spawn } = require("node:child_process") as typeof import("node:child_process");
   return new Promise((resolve, reject) => {
-    const child = spawn(binaryPath, ["models", "--json"], {
+    const child = cp.spawn(binaryPath, ["models", "--json"], {
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 15_000,
     });

@@ -196,7 +196,7 @@ async function testForkThread() {
 
 async function testSseStreamParsing() {
   // SSE mock: send data lines and verify client parses them
-  const { port, close } = await startMock((_method, path) => {
+  const { close } = await startMock((_method, path) => {
     assert.ok(path.includes("/v1/threads/thr_sse/events"));
     return {
       status: 200,
