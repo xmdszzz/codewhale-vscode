@@ -1,4 +1,7 @@
 import * as vscode from "vscode";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import { CodewhaleManager } from "./harness/manager";
 import { CodewhaleClient } from "./harness/client";
 import { ChatPanelProvider } from "./webview/provider";
@@ -89,6 +92,11 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     async (progress) => {
       try {
+        const mgr = manager;
+        if (!mgr) {
+          vscode.window.showErrorMessage("CodeWhale manager not initialized.");
+          return;
+        }
         // Listen for download progress and update the notification
         const onDownload = (p: { phase: string; current?: number; total?: number }) => {
           if (p.phase === "downloading" && p.current != null && p.total != null) {
@@ -98,9 +106,11 @@ export async function activate(context: vscode.ExtensionContext) {
             progress.report({ message: "Verifying checksum..." });
           }
         };
-        manager!.on("download", onDownload);
+        mgr.on("download", onDownload);
 
-        const { client, port } = await manager!.start(seed);
+        const { client, port } = await mgr.start(seed);
+        mgr.off("download", onDownload);
+
         console.log(`[CodeWhale] server ready on port ${port}`);
         chatProvider.setClient(client);
 
@@ -146,9 +156,6 @@ function buildProviderEnv(
   // even if env vars don't propagate (e.g. workspace switching edge cases)
   if (apiKey || baseUrl) {
     try {
-      const fs = require("node:fs") as typeof import("node:fs");
-      const path = require("node:path") as typeof import("node:path");
-      const os = require("node:os") as typeof import("node:os");
       const dir = path.join(os.homedir(), ".deepseek");
       fs.mkdirSync(dir, { recursive: true });
       let toml = "";

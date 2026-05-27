@@ -158,6 +158,10 @@ export class CodewhaleManager extends EventEmitter {
       await sleep(100);
     }
 
+    // Clean up previous client before creating a new one
+    this.client?.removeAllListeners();
+    this.client = null;
+
     // Health-check until ready
     const client = new CodewhaleClient(this.port, authToken);
     const deadline = Date.now() + HEALTH_TIMEOUT_MS;
@@ -218,31 +222,39 @@ export class CodewhaleManager extends EventEmitter {
       this.reconnectTimer = null;
     }
 
-    if (!this.process) return;
+    const proc = this.process;
+    if (!proc) return;
+
+    // Clean up old client listeners
+    this.client?.removeAllListeners();
+    this.client = null;
+
+    const shutdownTimeout = 2000;
 
     // Try graceful HTTP shutdown
     try {
-      http.request(
+      const req = http.request(
         `http://127.0.0.1:${this.port}/shutdown`,
         { method: "POST" },
-        () => {}
-      )
-        .on("error", () => {})
-        .setTimeout(2000, function (this: import("node:http").ClientRequest) {
-          this.destroy();
-        })
-        .end();
+        (res) => {
+          res.resume(); // drain response
+          // Wait briefly for the process to exit gracefully, then force-kill
+          setTimeout(() => {
+            if (proc.exitCode === null) proc.kill();
+          }, shutdownTimeout);
+        }
+      );
+      req.on("error", () => {
+        // If shutdown endpoint fails, force-kill immediately
+        if (proc.exitCode === null) proc.kill();
+      });
+      req.setTimeout(shutdownTimeout, function (this: import("node:http").ClientRequest) {
+        this.destroy();
+      });
+      req.end();
     } catch {
-      // ignore
+      if (proc.exitCode === null) proc.kill();
     }
-
-    setTimeout(() => {
-      if (this.process && this.process.exitCode === null) {
-        this.process.kill();
-      }
-    }, 2000);
-
-    this.client = null;
   }
 
   /** Update environment and restart the server with new config. */
@@ -261,8 +273,15 @@ export class CodewhaleManager extends EventEmitter {
 
     this.client = null;
 
-    // Wait for port to be released
-    await sleep(500);
+    // Poll until the old port is released, with a 10s timeout
+    const portWas = this.port;
+    if (portWas > 0) {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (await this.portFree(portWas)) break;
+        await sleep(100);
+      }
+    }
 
     this.env = newEnv;
     this.shuttingDown = false;

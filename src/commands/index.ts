@@ -43,6 +43,7 @@ export function registerCommands(
           auto_approve: defaultMode === "yolo",
           workspace: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
         });
+        chatProvider.openPanel();
         vscode.window.showInformationMessage(
           `New conversation created: ${thread.id.slice(0, 8)}...`
         );
@@ -61,11 +62,15 @@ export function registerCommands(
 
   // ── codewhale.toggleApprovalMode ───────────────────────────
   const approvalModes: ApprovalMode[] = ["plan", "agent", "yolo"];
-  let modeIndex = 0;
+  // Persist mode index across extension reloads
+  const KEY_MODE = "codewhale.approvalModeIndex";
+  let modeIndex: number = context.globalState.get<number>(KEY_MODE) ?? 0;
+  if (modeIndex < 0 || modeIndex >= approvalModes.length) modeIndex = 0;
 
   disposables.push(
     vscode.commands.registerCommand("codewhale.toggleApprovalMode", () => {
       modeIndex = (modeIndex + 1) % approvalModes.length;
+      context.globalState.update(KEY_MODE, modeIndex);
       const mode = approvalModes[modeIndex];
       const labels: Record<ApprovalMode, string> = {
         plan: "Plan — read-only exploration",
@@ -129,7 +134,7 @@ export function registerCommands(
         const preview = prepareDiffPreview(diffText, newContent);
         if (!preview) {
           vscode.window.showErrorMessage(
-            "Could not parse diff content."
+            `Could not parse diff content. File: ${filePath}`
           );
           return;
         }
