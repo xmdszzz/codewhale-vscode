@@ -87,6 +87,8 @@ interface State {
   contextTokens: number;
   contextCompactable: boolean;
   contextCost: number;
+  isCompacting: boolean;
+  currentTurnId: string | null;
 }
 
 const DEFAULT_MODEL_MAX_TOKENS = 1_000_000;
@@ -107,14 +109,17 @@ type Action =
   | { type: "removeContextFile"; path: string }
   | { type: "clearContextFiles" }
   | { type: "setContextUsage"; tokens: number; cost?: number }
-  | { type: "setCompactable"; compactable: boolean };
+  | { type: "setCompactable"; compactable: boolean }
+  | { type: "setCompacting"; compacting: boolean }
+  | { type: "setCurrentTurnId"; turnId: string | null }
+  | { type: "removeThread"; threadId: string };
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "setThreads":
       return { ...state, threads: action.threads };
     case "setActiveThread":
-      return { ...state, activeThreadId: action.threadId, messages: [], contextTokens: 0, contextCompactable: false, contextCost: 0 };
+      return { ...state, activeThreadId: action.threadId, messages: [], contextTokens: 0, contextCompactable: false, contextCost: 0, isCompacting: false, currentTurnId: null };
     case "setConnection":
       return { ...state, connectionState: action.state };
     case "setApprovalMode":
@@ -178,6 +183,12 @@ function reducer(state: State, action: Action): State {
       return { ...state, contextTokens: action.tokens, contextCost: action.cost ?? state.contextCost };
     case "setCompactable":
       return { ...state, contextCompactable: action.compactable };
+    case "setCompacting":
+      return { ...state, isCompacting: action.compacting };
+    case "setCurrentTurnId":
+      return { ...state, currentTurnId: action.turnId };
+    case "removeThread":
+      return { ...state, threads: state.threads.filter((t) => t.id !== action.threadId) };
     default:
       return state;
   }
@@ -229,6 +240,14 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+function getModeColor(mode: ApprovalMode): { bg: string; fg: string; dim: string } {
+  switch (mode) {
+    case "plan":  return { bg: "#1673B0", fg: "#ffffff", dim: "rgba(22,115,176,0.18)" };
+    case "agent": return { bg: "#1A7F3A", fg: "#ffffff", dim: "rgba(26,127,58,0.18)" };
+    case "yolo":  return { bg: "#C7503B", fg: "#ffffff", dim: "rgba(199,80,59,0.18)" };
+  }
+}
+
 const RING_RADIUS = 11;
 const RING_STROKE = 3;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
@@ -240,12 +259,14 @@ function ContextRing({
   compactable,
   onCompact,
   cost,
+  compacting,
 }: {
   tokens: number;
   maxTokens: number;
   compactable: boolean;
   onCompact: () => void;
   cost: number;
+  compacting: boolean;
 }) {
   const pct = Math.min(tokens / maxTokens, 1);
   const fillOffset = RING_CIRCUMFERENCE * (1 - pct);
@@ -260,22 +281,26 @@ function ContextRing({
 
   return (
     <div
-      title={`Context: ${formatTokens(tokens)} / ${formatTokens(maxTokens)} (${Math.round(pct * 100)}%)${cost > 0 ? ` — $${cost.toFixed(4)}` : ""}${hasContent ? " — Click to compact" : ""}`}
-      onClick={hasContent ? onCompact : undefined}
+      title={compacting ? "Compacting context..." : `Context: ${formatTokens(tokens)} / ${formatTokens(maxTokens)} (${Math.round(pct * 100)}%)${cost > 0 ? ` — $${cost.toFixed(4)}` : ""}${hasContent ? " — Click to compact" : ""}`}
+      onClick={compacting ? undefined : (hasContent ? onCompact : undefined)}
       style={{
         display: "flex",
         alignItems: "center",
         gap: 3,
-        cursor: hasContent ? "pointer" : "default",
+        cursor: compacting ? "wait" : (hasContent ? "pointer" : "default"),
         opacity: hasContent ? 1 : 0.3,
         padding: "1px 6px",
         borderRadius: 10,
         transition: "background 0.15s",
       }}
-      onMouseEnter={(e) => { if (hasContent) e.currentTarget.style.background = "var(--vscode-toolbar-hoverBackground)"; }}
+      onMouseEnter={(e) => { if (hasContent && !compacting) e.currentTarget.style.background = "var(--vscode-toolbar-hoverBackground)"; }}
       onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
     >
       <svg width="22" height="22" viewBox={`0 0 ${RING_VIEWBOX} ${RING_VIEWBOX}`}>
+        <style>
+          {`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+            .cw-spin { animation: spin 1s linear infinite; transform-origin: ${RING_VIEWBOX / 2}px ${RING_VIEWBOX / 2}px; }`}
+        </style>
         <circle
           cx={RING_VIEWBOX / 2}
           cy={RING_VIEWBOX / 2}
@@ -284,7 +309,7 @@ function ContextRing({
           stroke="var(--vscode-panel-border)"
           strokeWidth={RING_STROKE}
         />
-        {hasContent && (
+        {hasContent && !compacting && (
           <circle
             cx={RING_VIEWBOX / 2}
             cy={RING_VIEWBOX / 2}
@@ -298,7 +323,7 @@ function ContextRing({
             strokeLinecap="round"
           />
         )}
-        {shouldCompact && (
+        {shouldCompact && !compacting && (
           <text
             x={RING_VIEWBOX / 2}
             y={RING_VIEWBOX / 2 + 4}
@@ -309,9 +334,21 @@ function ContextRing({
             ⟳
           </text>
         )}
+        {compacting && (
+          <text
+            className="cw-spin"
+            x={RING_VIEWBOX / 2}
+            y={RING_VIEWBOX / 2 + 4}
+            textAnchor="middle"
+            fontSize="11"
+            fill="var(--vscode-inputValidation-warningBorder)"
+          >
+            ⟳
+          </text>
+        )}
       </svg>
-      <span style={{ fontSize: 11, color: "var(--vscode-descriptionForeground)" }}>
-        {formatTokens(tokens)}{cost > 0 ? `  $${cost.toFixed(2)}` : ""}
+      <span style={{ fontSize: 11, color: compacting ? "var(--vscode-inputValidation-warningBorder)" : "var(--vscode-descriptionForeground)" }}>
+        {compacting ? "Compacting..." : `${formatTokens(tokens)}${cost > 0 ? `  $${cost.toFixed(2)}` : ""}`}
       </span>
     </div>
   );
@@ -377,6 +414,10 @@ function MessageInput({
   contextCompactable,
   onCompact,
   contextCost,
+  isCompacting,
+  onNewThread,
+  isBusy,
+  onCancel,
 }: {
   disabled: boolean;
   onSend: (text: string) => void;
@@ -390,6 +431,10 @@ function MessageInput({
   contextCompactable: boolean;
   onCompact: () => void;
   contextCost: number;
+  isCompacting: boolean;
+  onNewThread: () => void;
+  isBusy: boolean;
+  onCancel: () => void;
 }) {
   const [value, setValue] = useState("");
   const [showAttach, setShowAttach] = useState(false);
@@ -727,14 +772,34 @@ function MessageInput({
 
         {/* Context usage ring */}
         {contextTokens > 0 && (
-          <div style={{ marginLeft: 12 }}>
+          <div style={{ marginLeft: 12, display: "flex", alignItems: "center", gap: 6 }}>
             <ContextRing
               tokens={contextTokens}
               maxTokens={contextMaxTokens}
               compactable={contextCompactable}
               onCompact={onCompact}
               cost={contextCost}
+              compacting={isCompacting}
             />
+            {contextTokens > contextMaxTokens && (
+              <button
+                onClick={onNewThread}
+                title="上下文已满，创建新线程继续对话"
+                style={{
+                  padding: "2px 8px",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  border: "1px solid var(--vscode-inputValidation-errorBorder)",
+                  borderRadius: 4,
+                  background: "transparent",
+                  color: "var(--vscode-inputValidation-errorBorder)",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                新上下文
+              </button>
+            )}
           </div>
         )}
 
@@ -751,30 +816,52 @@ function MessageInput({
             padding: 1,
           }}
         >
-          {modes.map((m) => (
+          {modes.map((m) => {
+            const isActive = mode === m.key;
+            const mc = getModeColor(m.key);
+            return (
             <button
               key={m.key}
               onClick={() => onModeChange(m.key)}
-              className={`mode-btn${mode === m.key ? " active" : ""}`}
+              className={`mode-btn${isActive ? " active" : ""}`}
+              style={isActive ? { background: mc.bg, color: mc.fg, fontWeight: 600 } : undefined}
             >
               {m.label}
             </button>
-          ))}
+            );
+          })}
         </div>
 
-        {/* Send button */}
-        <button
-          onClick={handleSend}
-          disabled={disabled || !value.trim()}
-          className="send-btn"
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            opacity: disabled || !value.trim() ? 0.5 : 1,
-          }}
-        >
-          Send
-        </button>
+        {/* Send / Stop button */}
+        {isBusy && !isCompacting ? (
+          <button
+            onClick={onCancel}
+            className="send-btn"
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              background: getModeColor(mode).bg,
+              color: getModeColor(mode).fg,
+            }}
+          >
+            ■ Stop
+          </button>
+        ) : (
+          <button
+            onClick={handleSend}
+            disabled={disabled || !value.trim() || isCompacting}
+            className="send-btn"
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              background: getModeColor(mode).bg,
+              color: getModeColor(mode).fg,
+              opacity: disabled || !value.trim() || isCompacting ? 0.5 : 1,
+            }}
+          >
+            ▶ Send
+          </button>
+        )}
       </div>
     </div>
   );
@@ -851,10 +938,13 @@ function renderMarkdown(md: string): string {
     return protect(`<blockquote style="border-left:3px solid var(--vscode-activityBar-border);margin:8px 0;padding:4px 12px;color:var(--vscode-descriptionForeground);">${content}</blockquote>`);
   });
 
-  // Headers
-  html = html.replace(/^### (.+)$/gm, (_m, content: string) => protect(`<h4 style="margin:12px 0 4px;font-size:14px;">${content}</h4>`));
-  html = html.replace(/^## (.+)$/gm, (_m, content: string) => protect(`<h3 style="margin:14px 0 4px;font-size:15px;">${content}</h3>`));
-  html = html.replace(/^# (.+)$/gm, (_m, content: string) => protect(`<h2 style="margin:16px 0 6px;font-size:16px;">${content}</h2>`));
+  // Headers — match most-specific first so #### doesn't become ### + #content
+  html = html.replace(/^###### (.+)$/gm, (_m, content: string) => protect(`<h6 style="margin:8px 0 2px;font-size:11px;font-weight:600;color:var(--vscode-descriptionForeground);">${content}</h6>`));
+  html = html.replace(/^##### (.+)$/gm, (_m, content: string) => protect(`<h5 style="margin:10px 0 2px;font-size:12px;">${content}</h5>`));
+  html = html.replace(/^#### (.+)$/gm, (_m, content: string) => protect(`<h4 style="margin:12px 0 4px;font-size:13px;">${content}</h4>`));
+  html = html.replace(/^### (.+)$/gm, (_m, content: string) => protect(`<h3 style="margin:14px 0 4px;font-size:14px;">${content}</h3>`));
+  html = html.replace(/^## (.+)$/gm, (_m, content: string) => protect(`<h2 style="margin:16px 0 4px;font-size:15px;">${content}</h2>`));
+  html = html.replace(/^# (.+)$/gm, (_m, content: string) => protect(`<h1 style="margin:18px 0 6px;font-size:16px;">${content}</h1>`));
 
   // Horizontal rules
   html = html.replace(/^[-*_]{3,}$/gm, () => protect('<hr style="border:none;border-top:1px solid var(--vscode-panel-border);margin:12px 0;">'));
@@ -937,7 +1027,13 @@ function ReasoningBlock({ text }: { text: string }) {
   );
 }
 
-const AgentBubble = memo(function AgentBubble({ msg }: { msg: UIMessage & { kind: "agent" } }) {
+const AgentBubble = memo(function AgentBubble({ msg, onFork }: {
+  msg: UIMessage & { kind: "agent" };
+  onFork?: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+
   return (
     <div
       style={{
@@ -945,13 +1041,77 @@ const AgentBubble = memo(function AgentBubble({ msg }: { msg: UIMessage & { kind
         fontSize: 13,
         lineHeight: 1.5,
         wordBreak: "break-word",
+        position: "relative",
       }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => { setHover(false); setMenuOpen(false); }}
     >
       <ReasoningBlock text={msg.reasoning} />
       {msg.content ? (
         <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
       ) : (
         msg.streaming ? <Cursor /> : null
+      )}
+
+      {/* Hover actions */}
+      {hover && !msg.streaming && onFork && (
+        <div style={{ position: "absolute", top: 6, right: 8 }}>
+          <button
+            onClick={(e) => { e.stopPropagation(); setMenuOpen(!menuOpen); }}
+            title="Message actions"
+            style={{
+              width: 22,
+              height: 22,
+              border: "none",
+              borderRadius: 3,
+              cursor: "pointer",
+              fontSize: 14,
+              lineHeight: "14px",
+              background: menuOpen ? "var(--vscode-toolbar-hoverBackground)" : "transparent",
+              color: "var(--vscode-descriptionForeground)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            ⋯
+          </button>
+          {menuOpen && (
+            <div
+              style={{
+                position: "absolute",
+                top: 24,
+                right: 0,
+                background: "var(--vscode-menu-background, var(--vscode-sideBar-background))",
+                border: "1px solid var(--vscode-panel-border)",
+                borderRadius: 4,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                zIndex: 100,
+                minWidth: 180,
+                overflow: "hidden",
+              }}
+            >
+              <button
+                onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onFork(); }}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  padding: "6px 12px",
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--vscode-foreground)",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  textAlign: "left",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--vscode-list-hoverBackground)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+              >
+                ✂ Fork from here
+              </button>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -1468,7 +1628,6 @@ function ThreadSidebar({
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
-  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
 
   return (
@@ -1529,7 +1688,8 @@ function ThreadSidebar({
         />
       </div>
       <div style={{ flex: 1, overflowY: "auto" }}>
-        {threads.map((t) => (
+        {threads.map((t) => {
+          return (
           <div
             key={t.id}
             onClick={() => onSelect(t.id)}
@@ -1551,9 +1711,10 @@ function ThreadSidebar({
                   : "var(--vscode-foreground)",
               borderLeft: t.id === activeId ? "3px solid var(--vscode-focusBorder)" : "3px solid transparent",
               opacity: t.archived ? 0.5 : 1,
+              transition: "opacity 0.2s",
             }}
           >
-            <div style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <div style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6 }}>
               {editingId === t.id ? (
                 <input
                   autoFocus
@@ -1585,7 +1746,24 @@ function ThreadSidebar({
                   }}
                 />
               ) : (
-                t.title || t.id.slice(0, 8)
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {t.title || t.id.slice(0, 8)}
+                </span>
+              )}
+              {t.mode && !editingId && (
+                <span style={{
+                  fontSize: 9,
+                  padding: "0 5px",
+                  borderRadius: 6,
+                  lineHeight: "14px",
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  background: getModeColor(t.mode as ApprovalMode).dim,
+                  color: getModeColor(t.mode as ApprovalMode).bg,
+                  flexShrink: 0,
+                }}>
+                  {t.mode}
+                </span>
               )}
             </div>
             <div
@@ -1625,24 +1803,17 @@ function ThreadSidebar({
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (deletingId === t.id) {
-                      onDelete(t.id);
-                      setDeletingId(null);
-                    } else {
-                      setDeletingId(t.id);
-                      setTimeout(() => setDeletingId(null), 3000);
-                    }
+                    onDelete(t.id);
                   }}
-                  title={deletingId === t.id ? "Click again to confirm delete" : "Delete"}
+                  title="Delete"
                   className="mini-btn"
-                  style={deletingId === t.id ? { background: "var(--vscode-inputValidation-errorBackground)", color: "var(--vscode-inputValidation-errorBorder)" } : undefined}
                 >
-                  {deletingId === t.id ? "❓" : "🗑️"}
+                  🗑️
                 </button>
               </div>
             )}
           </div>
-        ))}
+        ); })}
         {threads.length === 0 && (
           <div
             style={{
@@ -1741,6 +1912,8 @@ export default function App() {
     contextTokens: 0,
     contextCompactable: false,
     contextCost: 0,
+    isCompacting: false,
+    currentTurnId: null,
   });
 
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -1748,6 +1921,8 @@ export default function App() {
   const itemKindRef = useRef<Map<string, string>>(new Map()); // item_id → kind from item.started
   const hasDeltaRef = useRef<Set<string>>(new Set()); // item_ids that received at least one delta
   const pendingUserMsgRef = useRef<string>("");
+  const skipEstimationRef = useRef(false); // skip local estimation after compaction/backend updates
+  const pendingAutoSendRef = useRef(""); // text to send once auto-created thread is ready
 
   // ── Scroll to bottom when new messages arrive ────────────
   useEffect(() => {
@@ -1782,6 +1957,20 @@ export default function App() {
             type: "setActiveThread",
             threadId: msg.threadId as string,
           });
+          if (pendingAutoSendRef.current) {
+            const text = pendingAutoSendRef.current;
+            pendingAutoSendRef.current = "";
+            pendingUserMsgRef.current = text;
+            dispatch({
+              type: "addMessage",
+              msg: { kind: "user", id: `user-${Date.now()}`, content: text },
+            });
+            vscode.postMessage({
+              type: "sendPrompt",
+              threadId: msg.threadId as string,
+              prompt: text,
+            });
+          }
           break;
 
         case "sseEvent":
@@ -1798,7 +1987,6 @@ export default function App() {
           if (state.activeThreadId === deletedId) {
             dispatch({ type: "setActiveThread", threadId: null });
           }
-          vscode.postMessage({ type: "listThreads" });
           break;
         }
 
@@ -1857,6 +2045,7 @@ export default function App() {
         }
 
         case "contextCompacted": {
+          dispatch({ type: "setCompacting", compacting: false });
           dispatch({ type: "setContextUsage", tokens: 0 });
           dispatch({ type: "setCompactable", compactable: false });
           break;
@@ -1920,6 +2109,9 @@ export default function App() {
             type: "addMessage",
             msg: { kind: "status", id, text: statusText, level: "info" },
           });
+          if (kind === "context_compaction") {
+            dispatch({ type: "setCompacting", compacting: true });
+          }
         } else if (kind === "agent_message" || kind === "agent_reasoning") {
           const id = (item?.id as string) ?? ev.item_id;
           if (activeItemRef.current.has(id)) return;
@@ -2005,12 +2197,14 @@ export default function App() {
           }
         } else if (kind === "context_compaction" || kind === "status") {
           // Compaction complete — reset context usage and show result
+          dispatch({ type: "setCompacting", compacting: false });
           dispatch({ type: "setContextUsage", tokens: 0 });
           dispatch({ type: "setCompactable", compactable: false });
           const detail = (item?.detail as string) ?? (payload?.detail as string) ?? "";
-          // Update status message with result
+          // Update status message with result — skip local estimation to avoid spike
           const id = ev.item_id;
           if (detail && activeItemRef.current.has(id)) {
+            skipEstimationRef.current = true;
             dispatch({ type: "updateMessage", id, patch: { text: `Context compacted: ${detail}` } as Partial<UIMessage> });
           }
         } else if (kind === "agent_message" || kind === "agent_reasoning" || kind === "unknown") {
@@ -2123,15 +2317,16 @@ export default function App() {
 
       case "turn.completed": {
         dispatch({ type: "finishAllStreaming" });
+        dispatch({ type: "setCurrentTurnId", turnId: null });
         activeItemRef.current.clear();
         itemKindRef.current.clear();
         hasDeltaRef.current.clear();
-        // Context usage is estimated from messages via useEffect
         break;
       }
 
       case "turn.error": {
         dispatch({ type: "finishAllStreaming" });
+        dispatch({ type: "setCurrentTurnId", turnId: null });
         activeItemRef.current.clear();
         itemKindRef.current.clear();
         hasDeltaRef.current.clear();
@@ -2148,10 +2343,22 @@ export default function App() {
         break;
       }
 
+      case "turn.aborted": {
+        dispatch({ type: "finishAllStreaming" });
+        dispatch({ type: "setCurrentTurnId", turnId: null });
+        activeItemRef.current.clear();
+        itemKindRef.current.clear();
+        hasDeltaRef.current.clear();
+        break;
+      }
+
       // Lifecycle events — informational, not displayed
       case "thread.started":
-      case "turn.started":
       case "turn.lifecycle":
+        break;
+
+      case "turn.started":
+        dispatch({ type: "setCurrentTurnId", turnId: (payload.turn_id as string) ?? ev.turn_id });
         break;
 
       default: {
@@ -2164,7 +2371,12 @@ export default function App() {
   // ── Callbacks ─────────────────────────────────────────────
   const handleSend = useCallback(
     (text: string) => {
-      if (!state.activeThreadId) return;
+      if (!state.activeThreadId) {
+        // No active thread — create one first, then auto-send
+        pendingAutoSendRef.current = text;
+        vscode.postMessage({ type: "newThread", mode: state.approvalMode });
+        return;
+      }
       pendingUserMsgRef.current = text;
       dispatch({
         type: "addMessage",
@@ -2176,7 +2388,7 @@ export default function App() {
         prompt: text,
       });
     },
-    [state.activeThreadId]
+    [state.activeThreadId, state.approvalMode]
   );
 
   const handleNewThread = useCallback(() => {
@@ -2186,6 +2398,12 @@ export default function App() {
   const handleSelectThread = useCallback((id: string) => {
     vscode.postMessage({ type: "selectThread", threadId: id });
   }, []);
+
+  const handleFork = useCallback(() => {
+    if (state.activeThreadId) {
+      vscode.postMessage({ type: "forkThread", threadId: state.activeThreadId });
+    }
+  }, [state.activeThreadId]);
 
   const handleApproval = useCallback(
     (approvalId: string, decision: string, remember?: boolean) => {
@@ -2211,6 +2429,7 @@ export default function App() {
 
   const handleDelete = useCallback((id: string) => {
     console.log("[CodeWhale webview] handleDelete called, id:", id);
+    dispatch({ type: "removeThread", threadId: id });
     vscode.postMessage({ type: "deleteThread", threadId: id });
   }, []);
 
@@ -2231,22 +2450,27 @@ export default function App() {
     (m) =>
       (m.kind === "agent" && m.streaming) ||
       (m.kind === "tool" && m.status === "running")
-  );
+  ) || state.isCompacting;
 
   // Estimate context tokens from message content (≈3 chars per token)
+  // Exclude status messages — they are UI annotations, not LLM context
+  // Skip estimation when backend is updating (compaction, threadUsage) to avoid flicker
   useEffect(() => {
+    if (skipEstimationRef.current) {
+      skipEstimationRef.current = false;
+      return;
+    }
     let chars = 0;
     for (const m of state.messages) {
       if (m.kind === "user") chars += m.content.length;
       else if (m.kind === "agent") chars += m.content.length + m.reasoning.length;
       else if (m.kind === "tool") chars += (m.output?.length ?? 0) + (m.args?.length ?? 0);
-      else if (m.kind === "status") chars += m.text.length;
+      // status messages excluded — they are UI-only, not part of context
     }
     const estimatedTokens = Math.ceil(chars / 3);
     dispatch({ type: "setContextUsage", tokens: estimatedTokens });
     dispatch({ type: "setCompactable", compactable: estimatedTokens > DEFAULT_MODEL_MAX_TOKENS * 0.4 });
   }, [state.messages]);
-
   return (
     <ErrorBoundary>
     <style>{`
@@ -2340,6 +2564,19 @@ export default function App() {
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontWeight: 700, fontSize: 14 }}>CodeWhale</span>
+            <span style={{
+              fontSize: 9,
+              padding: "1px 6px",
+              borderRadius: 8,
+              lineHeight: "16px",
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: "0.5px",
+              background: getModeColor(state.approvalMode).bg,
+              color: getModeColor(state.approvalMode).fg,
+            }}>
+              {state.approvalMode}
+            </span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <button
@@ -2428,26 +2665,9 @@ export default function App() {
               <span style={{ fontSize: 28 }}>🐋</span>
               <span>
                 {state.connectionState === "connected"
-                  ? "Create a new thread to get started"
+                  ? "Type a message to get started"
                   : "Waiting for CodeWhale to connect..."}
               </span>
-              {state.connectionState === "connected" && (
-                <button
-                  onClick={handleNewThread}
-                  style={{
-                    marginTop: 4,
-                    padding: "6px 16px",
-                    border: "none",
-                    borderRadius: 4,
-                    cursor: "pointer",
-                    fontSize: 13,
-                    background: "var(--vscode-button-background)",
-                    color: "var(--vscode-button-foreground)",
-                  }}
-                >
-                  New Thread
-                </button>
-              )}
             </div>
           )}
           {state.messages.map((msg) => {
@@ -2474,7 +2694,7 @@ export default function App() {
                   </div>
                 );
               case "agent":
-                return <AgentBubble key={msg.id} msg={msg} />;
+                return <AgentBubble key={msg.id} msg={msg} onFork={handleFork} />;
               case "tool":
                 return <ToolCard key={msg.id} msg={msg} />;
               case "approval":
@@ -2505,7 +2725,6 @@ export default function App() {
         <MessageInput
           disabled={
             state.connectionState !== "connected" ||
-            state.activeThreadId === null ||
             isBusy
           }
           onSend={handleSend}
@@ -2517,8 +2736,23 @@ export default function App() {
           contextTokens={state.contextTokens}
           contextMaxTokens={DEFAULT_MODEL_MAX_TOKENS}
           contextCompactable={state.contextCompactable}
-          onCompact={() => vscode.postMessage({ type: "compactThread", threadId: state.activeThreadId })}
+          onCompact={() => {
+            dispatch({ type: "setCompacting", compacting: true });
+            vscode.postMessage({ type: "compactThread", threadId: state.activeThreadId });
+          }}
           contextCost={state.contextCost}
+          isCompacting={state.isCompacting}
+          onNewThread={handleNewThread}
+          isBusy={isBusy}
+          onCancel={() => {
+            if (state.activeThreadId && state.currentTurnId) {
+              vscode.postMessage({
+                type: "cancelTurn",
+                threadId: state.activeThreadId,
+                turnId: state.currentTurnId,
+              });
+            }
+          }}
         />
       </div>
     </div>

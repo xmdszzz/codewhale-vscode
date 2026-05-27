@@ -11,18 +11,8 @@ export async function activate(context: vscode.ExtensionContext) {
   const binaryVersion = config.get<string>("binaryVersion", "v0.8.44");
   const customBinaryPath = config.get<string>("binaryPath", "") || undefined;
 
-  // Build environment from stored provider config
-  const providerConfig = context.globalState.get<Record<string, string>>("providerConfig") ?? {};
-  const env: Record<string, string> = {};
-  if (providerConfig.providerName) {
-    env.DEEPSEEK_PROVIDER = providerConfig.providerName;
-  }
-  if (providerConfig.apiKey) {
-    env.DEEPSEEK_API_KEY = providerConfig.apiKey;
-  }
-  if (providerConfig.baseUrl) {
-    env.DEEPSEEK_BASE_URL = providerConfig.baseUrl;
-  }
+  // Build environment from VS Code settings (primary) + globalState (fallback)
+  const env = buildProviderEnv(config, context);
 
   manager = new CodewhaleManager(
     context.globalStorageUri.fsPath,
@@ -48,11 +38,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // When config changes, restart the server with new env vars
   chatProvider.onConfigChanged = () => {
-    const newConfig = context.globalState.get<Record<string, string>>("providerConfig") ?? {};
-    const newEnv: Record<string, string> = {};
-    if (newConfig.providerName) newEnv.DEEPSEEK_PROVIDER = newConfig.providerName;
-    if (newConfig.apiKey) newEnv.DEEPSEEK_API_KEY = newConfig.apiKey;
-    if (newConfig.baseUrl) newEnv.DEEPSEEK_BASE_URL = newConfig.baseUrl;
+    const newConfig = vscode.workspace.getConfiguration("codewhale");
+    const newEnv = buildProviderEnv(newConfig, context);
 
     vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: "CodeWhale: Applying new config...", cancellable: false },
@@ -136,4 +123,43 @@ export async function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
   manager?.stop();
+}
+
+/** Build env vars from VS Code settings (primary) + globalState (fallback). */
+function buildProviderEnv(
+  config: vscode.WorkspaceConfiguration,
+  context: vscode.ExtensionContext
+): Record<string, string> {
+  const stored = context.globalState.get<Record<string, string>>("providerConfig") ?? {};
+
+  // VS Code settings take precedence, then globalState fallback
+  const providerName = config.get<string>("providerName", "") || stored.providerName || "";
+  const apiKey = config.get<string>("apiKey", "") || stored.apiKey || "";
+  const baseUrl = config.get<string>("baseUrl", "") || stored.baseUrl || "";
+
+  const env: Record<string, string> = {};
+  if (providerName) env.DEEPSEEK_PROVIDER = providerName;
+  if (apiKey) env.DEEPSEEK_API_KEY = apiKey;
+  if (baseUrl) env.DEEPSEEK_BASE_URL = baseUrl;
+
+  // Mirror to ~/.deepseek/config.toml so the backend can find the key
+  // even if env vars don't propagate (e.g. workspace switching edge cases)
+  if (apiKey || baseUrl) {
+    try {
+      const fs = require("node:fs") as typeof import("node:fs");
+      const path = require("node:path") as typeof import("node:path");
+      const os = require("node:os") as typeof import("node:os");
+      const dir = path.join(os.homedir(), ".deepseek");
+      fs.mkdirSync(dir, { recursive: true });
+      let toml = "";
+      if (apiKey) toml += `api_key = "${apiKey}"\n`;
+      if (baseUrl) toml += `base_url = "${baseUrl}"\n`;
+      fs.writeFileSync(path.join(dir, "config.toml"), toml, "utf-8");
+      console.log("[CodeWhale] synced config to ~/.deepseek/config.toml");
+    } catch {
+      // best-effort file write — env vars still work
+    }
+  }
+
+  return env;
 }

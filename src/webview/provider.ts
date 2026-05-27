@@ -198,11 +198,7 @@ export class ChatPanelProvider {
               .getConfiguration("codewhale")
               .get<string>("defaultMode", "agent");
 
-          // Pick workspace from active editor, fall back to first folder
-          const wsFolder = vscode.window.activeTextEditor
-            ? vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri)
-            : undefined;
-          const workspace = wsFolder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          const workspace = this._currentWorkspace();
 
           console.log("[CodeWhale] creating thread...");
           const thread = await client.createThread({
@@ -233,7 +229,8 @@ export class ChatPanelProvider {
         if (!client) return;
         try {
           const search = (msg.search as string) || undefined;
-          const threads = await client.listThreadSummaries(50, search);
+          const workspace = this._currentWorkspace();
+          const threads = await client.listThreadSummaries(50, search, workspace);
           const filtered = threads.filter((t) => !this._deletedThreadIds.has(t.id));
           this._postToWebview({ type: "threadList", threads: filtered });
         } catch {
@@ -261,6 +258,33 @@ export class ChatPanelProvider {
           console.log("[CodeWhale] turn started, waiting for SSE events...");
         } catch (err) {
           console.error("[CodeWhale] startTurn failed:", err);
+          this._postToWebview({
+            type: "error",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        break;
+      }
+
+      case "cancelTurn": {
+        if (!client) return;
+        try {
+          await client.cancelTurn(msg.threadId as string, msg.turnId as string);
+        } catch (err) {
+          console.error("[CodeWhale] cancelTurn failed:", err);
+        }
+        break;
+      }
+
+      case "forkThread": {
+        if (!client) return;
+        try {
+          const forked = await client.forkThread(msg.threadId as string);
+          console.log("[CodeWhale] thread forked:", forked.id);
+          this._postToWebview({ type: "threadCreated", thread: forked });
+          this._switchToThread(forked.id);
+        } catch (err) {
+          console.error("[CodeWhale] forkThread failed:", err);
           this._postToWebview({
             type: "error",
             message: err instanceof Error ? err.message : String(err),
@@ -315,54 +339,11 @@ export class ChatPanelProvider {
         const threadId = msg.threadId as string;
         console.log("[CodeWhale] deleteThread requested:", threadId);
 
-        // Always mark as deleted locally so it never reappears in the list
+        // Mark as deleted locally
         this._deletedThreadIds.add(threadId);
         this._persistDeleted();
 
-        // Try best-effort server-side deletion
-        // Strategy 1: HTTP API
-        try {
-          await client.deleteThread(threadId);
-          console.log("[CodeWhale] deleteThread: HTTP API succeeded");
-        } catch {
-          console.log("[CodeWhale] deleteThread: HTTP API failed, trying filesystem...");
-          // Strategy 2: Try to find thread on disk
-          try {
-            const detail = await client.getThread(threadId);
-            const t = detail.thread as unknown as Record<string, unknown>;
-            const candidates: string[] = [];
-            if (t.path) candidates.push(t.path as string);
-            if (t.workspace) {
-              const ws = t.workspace as string;
-              candidates.push(`${ws}/.codewhale/threads/${threadId}`);
-              candidates.push(`${ws}/.codewhale/sessions/${threadId}`);
-            }
-            const homedir = os.homedir();
-            candidates.push(`${homedir}/.codewhale/threads/${threadId}`);
-            candidates.push(`${homedir}/.codewhale/sessions/${threadId}`);
-            candidates.push(`${homedir}/.config/codewhale/threads/${threadId}`);
-            for (const p of candidates) {
-              if (fs.existsSync(p)) {
-                fs.rmSync(p, { recursive: true, force: true });
-                console.log("[CodeWhale] deleteThread: filesystem deleted", p);
-                break;
-              }
-            }
-          } catch {
-            // best-effort
-          }
-          // Strategy 3: CLI binary
-          if (this._binaryPath) {
-            try {
-              cp.execFileSync(this._binaryPath, ["thread", "delete", threadId], { timeout: 10_000, stdio: "pipe" });
-              console.log("[CodeWhale] deleteThread: CLI succeeded");
-            } catch {
-              // CLI didn't work either
-            }
-          }
-        }
-
-        // Always notify webview — local state already updated
+        // Notify webview immediately — UI responds before server cleanup
         this._postToWebview({ type: "threadDeleted", threadId });
         if (this._activeThreadId === threadId) {
           this._sseAbort?.abort();
@@ -371,6 +352,9 @@ export class ChatPanelProvider {
           this._postToWebview({ type: "activeThread", threadId: null });
         }
         this._sendThreadList(client);
+
+        // Server-side cleanup as fire-and-forget (best-effort, async)
+        this._deleteFromServer(client, threadId);
         break;
       }
 
@@ -387,12 +371,15 @@ export class ChatPanelProvider {
       }
 
       case "getProviderConfig": {
-        const config =
+        const stored =
           this._context?.globalState.get<Record<string, unknown>>("providerConfig") ?? {};
-        this._postToWebview({
-          type: "providerConfig",
-          config,
-        });
+        const vsConfig = vscode.workspace.getConfiguration("codewhale");
+        // Merge: VS Code settings take precedence, globalState is fallback
+        const config: Record<string, unknown> = {};
+        config.providerName = vsConfig.get<string>("providerName", "") || stored.providerName || "";
+        config.apiKey = vsConfig.get<string>("apiKey", "") || stored.apiKey || "";
+        config.baseUrl = vsConfig.get<string>("baseUrl", "") || stored.baseUrl || "";
+        this._postToWebview({ type: "providerConfig", config });
         break;
       }
 
@@ -402,6 +389,8 @@ export class ChatPanelProvider {
           const result = await client.compactThread(msg.threadId as string);
           if (result.ok) {
             this._postToWebview({ type: "contextCompacted", threadId: msg.threadId });
+            // Fetch real token count from backend — compaction reduces context
+            this._fetchUsage(msg.threadId as string);
           }
         } catch (err) {
           this._postToWebview({
@@ -539,9 +528,63 @@ export class ChatPanelProvider {
     }
   }
 
+  /** Fire-and-forget server-side thread deletion. Called after UI already updated. */
+  private async _deleteFromServer(client: CodewhaleClient, threadId: string) {
+    // Strategy 1: HTTP API
+    try {
+      await client.deleteThread(threadId);
+      console.log("[CodeWhale] deleteThread: HTTP API succeeded");
+      return;
+    } catch {
+      console.log("[CodeWhale] deleteThread: HTTP API failed, trying filesystem...");
+    }
+    // Strategy 2: filesystem
+    try {
+      const detail = await client.getThread(threadId);
+      const t = detail.thread as unknown as Record<string, unknown>;
+      const candidates: string[] = [];
+      if (t.path) candidates.push(t.path as string);
+      if (t.workspace) {
+        const ws = t.workspace as string;
+        candidates.push(`${ws}/.codewhale/threads/${threadId}`);
+        candidates.push(`${ws}/.codewhale/sessions/${threadId}`);
+      }
+      const homedir = os.homedir();
+      candidates.push(`${homedir}/.codewhale/threads/${threadId}`);
+      candidates.push(`${homedir}/.codewhale/sessions/${threadId}`);
+      candidates.push(`${homedir}/.config/codewhale/threads/${threadId}`);
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          fs.rmSync(p, { recursive: true, force: true });
+          console.log("[CodeWhale] deleteThread: filesystem deleted", p);
+          return;
+        }
+      }
+    } catch {
+      // best-effort
+    }
+    // Strategy 3: CLI binary
+    if (this._binaryPath) {
+      try {
+        cp.execFileSync(this._binaryPath, ["thread", "delete", threadId], { timeout: 10_000, stdio: "pipe" });
+        console.log("[CodeWhale] deleteThread: CLI succeeded");
+      } catch {
+        // CLI didn't work either
+      }
+    }
+  }
+
+  private _currentWorkspace(): string | undefined {
+    const wsFolder = vscode.window.activeTextEditor
+      ? vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri)
+      : undefined;
+    return wsFolder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  }
+
   private async _sendThreadList(client: CodewhaleClient) {
     try {
-      const threads = await client.listThreadSummaries(50);
+      const workspace = this._currentWorkspace();
+      const threads = await client.listThreadSummaries(50, undefined, workspace);
       const filtered = threads.filter((t) => !this._deletedThreadIds.has(t.id));
       this._postToWebview({ type: "threadList", threads: filtered });
     } catch {

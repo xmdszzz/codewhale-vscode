@@ -116,10 +116,12 @@ export class CodewhaleClient extends EventEmitter {
 
   async listThreadSummaries(
     limit = 50,
-    search?: string
+    search?: string,
+    workspace?: string
   ): Promise<ThreadSummary[]> {
     const qs = new URLSearchParams({ limit: String(limit) });
     if (search) qs.set("search", search);
+    if (workspace) qs.set("workspace", workspace);
     return this.request("GET", `/v1/threads/summary?${qs}`);
   }
 
@@ -165,6 +167,12 @@ export class CodewhaleClient extends EventEmitter {
     params: StartTurnRequest
   ): Promise<unknown> {
     return this.request("POST", `/v1/threads/${threadId}/turns`, params);
+  }
+
+  // ── Cancel ──────────────────────────────────────────────────
+
+  async cancelTurn(threadId: string, turnId: string): Promise<unknown> {
+    return this.request("POST", `/v1/threads/${threadId}/turns/${turnId}/interrupt`);
   }
 
   // ── SSE event stream ───────────────────────────────────────

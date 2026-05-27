@@ -360,6 +360,7 @@ export interface ThreadSummary {
   model: string;
   mode: string;
   archived: boolean;
+  workspace?: string;
   updated_at: string;
   latest_turn_id?: string;
   latest_turn_status?: string;

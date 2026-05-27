@@ -2,7 +2,7 @@
   "name": "codewhale-vscode",
   "displayName": "CodeWhale AI",
   "description": "CodeWhale AI coding agent — VSCode frontend",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "HaiTaoJiang",
   "license": "MIT",
   "icon": "assets/icon.png",
@@ -98,6 +98,21 @@
           ],
           "default": "agent",
           "description": "Default approval mode for new threads"
+        },
+        "codewhale.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for your AI provider (e.g. DeepSeek). Set once, works across all projects."
+        },
+        "codewhale.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL for the AI provider API (e.g. https://api.deepseek.com/v1)"
+        },
+        "codewhale.providerName": {
+          "type": "string",
+          "default": "",
+          "description": "Provider name (e.g. deepseek, openai)"
         }
       }
     }

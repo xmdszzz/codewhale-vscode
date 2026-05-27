@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.2 — 2026-05-27
+
+### Added
+- Cancel/Stop button during AI generation (uses `POST /v1/threads/{id}/turns/{turnId}/interrupt`)
+- Fork from here — hover agent message → "⋯" menu → fork conversation
+- Auto-create thread on send: typing in empty state and pressing Send auto-creates a new thread
+- Color-coded mode badges (Plan=blue, Agent=green, YOLO=red) in header, input, and sidebar
+
+### Fixed
+- Delete thread: removed broken two-click confirmation (React closure stale state caused infinite retry loop)
+- Delete thread now removes item from sidebar instantly (optimistic UI)
+- Markdown headings: all 6 levels (h1–h6) now render properly
+- Per-project chat history: threads filtered by current workspace
+- Global config persistence: API key/base URL survive workspace switches
+- Compaction UX: spinner animation, locked input during compaction
+
+### Removed
+- Auto-compact feature (backend incompatibility)
+- Rewind code / Fork+Rewind (no backend REST endpoint)
+
 ## 0.1.0 — 2026-05-26
 
 ### Added

@@ -1,8 +1,5 @@
 # CodeWhale VSCode
 
-[![CI](https://github.com/codewhale/codewhale-vscode/actions/workflows/release.yml/badge.svg)](https://github.com/codewhale/codewhale-vscode/actions/workflows/release.yml)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/codewhale/codewhale-vscode/releases)
-
 VSCode extension for **CodeWhale** — an open-source AI coding agent powered by DeepSeek V4 with a 1M-token context window. Chat with the agent, approve or deny tool calls, view diffs, and manage conversations — all inside VSCode.
 
 ## Features
