@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
 import { CodewhaleClient } from "../harness/client";
-import { SseEventEnvelope } from "../harness/types";
+import { SseEventEnvelope, TurnRecord } from "../harness/types";
 import * as os from "node:os";
 import * as cp from "node:child_process";
 
@@ -126,7 +126,11 @@ export class ChatPanelProvider {
   // ── postMessage helpers ───────────────────────────────────
 
   private _postToWebview(msg: Record<string, unknown>) {
-    this._panel?.webview.postMessage(msg);
+    if (!this._panel) {
+      console.warn("[CodeWhale] postMessage dropped — no active panel:", msg.type);
+      return;
+    }
+    this._panel.webview.postMessage(msg);
   }
 
   /** Open CodeWhale as a dedicated editor panel (like Claude Code). */
@@ -173,262 +177,207 @@ export class ChatPanelProvider {
 
   // ── Incoming messages from webview ────────────────────────
 
+  private _errorMsg(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
   private async _handleMessage(msg: Record<string, unknown>) {
-    const client = this._client;
-
-    switch (msg.type) {
-      case "init": {
-        // Webview loaded — send current connection state
-        this._postToWebview({
-          type: "connectionState",
-          state: client ? "connected" : "connecting",
-        });
-        if (client) {
-          this._sendThreadList(client);
-        }
-        break;
-      }
-
-      case "newThread": {
-        if (!client) return;
-        try {
-          const mode =
-            (msg.mode as string) ??
-            vscode.workspace
-              .getConfiguration("codewhale")
-              .get<string>("defaultMode", "agent");
-
-          const workspace = this._currentWorkspace();
-
-          console.log("[CodeWhale] creating thread...");
-          const thread = await client.createThread({
-            mode,
-            auto_approve: mode === "yolo",
-            workspace,
-          });
-          console.log("[CodeWhale] thread created:", thread.id);
-          this._postToWebview({ type: "threadCreated", thread });
-          this._switchToThread(thread.id);
-        } catch (err) {
-          console.error("[CodeWhale] createThread failed:", err);
-          this._postToWebview({
-            type: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-        break;
-      }
-
-      case "listThreads": {
-        if (!client) return;
-        this._sendThreadList(client);
-        break;
-      }
-
-      case "searchThreads": {
-        if (!client) return;
-        try {
-          const search = (msg.search as string) || undefined;
-          const workspace = this._currentWorkspace();
-          const threads = await client.listThreadSummaries(50, search, workspace);
-          const filtered = threads.filter((t) => !this._deletedThreadIds.has(t.id));
-          this._postToWebview({ type: "threadList", threads: filtered });
-        } catch {
-          // best-effort
-        }
-        break;
-      }
-
-      case "selectThread": {
-        const threadId = msg.threadId as string;
-        this._loadAndSwitchThread(threadId);
-        break;
-      }
-
-      case "sendPrompt": {
-        if (!client || !this._activeThreadId) {
-          console.log("[CodeWhale] sendPrompt ignored — no client or thread");
-          return;
-        }
-        try {
-          console.log("[CodeWhale] starting turn for thread:", this._activeThreadId);
-          await client.startTurn(this._activeThreadId, {
-            prompt: msg.prompt as string,
-          });
-          console.log("[CodeWhale] turn started, waiting for SSE events...");
-        } catch (err) {
-          console.error("[CodeWhale] startTurn failed:", err);
-          this._postToWebview({
-            type: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-        break;
-      }
-
-      case "cancelTurn": {
-        if (!client) return;
-        try {
-          await client.cancelTurn(msg.threadId as string, msg.turnId as string);
-        } catch (err) {
-          console.error("[CodeWhale] cancelTurn failed:", err);
-        }
-        break;
-      }
-
-      case "forkThread": {
-        if (!client) return;
-        try {
-          const forked = await client.forkThread(msg.threadId as string);
-          console.log("[CodeWhale] thread forked:", forked.id);
-          this._postToWebview({ type: "threadCreated", thread: forked });
-          this._switchToThread(forked.id);
-        } catch (err) {
-          console.error("[CodeWhale] forkThread failed:", err);
-          this._postToWebview({
-            type: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-        break;
-      }
-
-      case "approvalDecision": {
-        if (!client) return;
-        try {
-          await client.submitApproval(msg.approvalId as string, {
-            decision: msg.decision as string,
-            remember: msg.remember as boolean | undefined,
-          });
-        } catch (err) {
-          this._postToWebview({
-            type: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-        break;
-      }
-
-      case "viewDiff": {
-        vscode.commands.executeCommand("codewhale.viewDiff", {
-          filePath: msg.filePath as string,
-          diffText: msg.diffText as string,
-        });
-        break;
-      }
-
-      case "renameThread": {
-        if (!client) return;
-        try {
-          const threadId = msg.threadId as string;
-          const title = msg.title as string;
-          await client.updateThread(threadId, { title });
-          this._postToWebview({ type: "threadRenamed", threadId, title });
-          this._sendThreadList(client);
-        } catch (err) {
-          this._postToWebview({
-            type: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-        break;
-      }
-
-      case "deleteThread": {
-        if (!client) return;
-        const threadId = msg.threadId as string;
-        console.log("[CodeWhale] deleteThread requested:", threadId);
-
-        // Mark as deleted locally
-        this._deletedThreadIds.add(threadId);
-        this._persistDeleted();
-
-        // Notify webview immediately — UI responds before server cleanup
-        this._postToWebview({ type: "threadDeleted", threadId });
-        if (this._activeThreadId === threadId) {
-          this._sseAbort?.abort();
-          this._sseAbort = null;
-          this._activeThreadId = null;
-          this._postToWebview({ type: "activeThread", threadId: null });
-        }
-        this._sendThreadList(client);
-
-        // Server-side cleanup as fire-and-forget (best-effort, async)
-        this._deleteFromServer(client, threadId);
-        break;
-      }
-
-      case "saveProviderConfig": {
-        const providerConfig = msg.config as Record<string, unknown>;
-        this._context?.globalState.update("providerConfig", providerConfig);
-        this._postToWebview({
-          type: "providerConfigSaved",
-          config: providerConfig,
-        });
-        // Notify extension to restart server with new config
-        this.onConfigChanged?.();
-        break;
-      }
-
-      case "getProviderConfig": {
-        const stored =
-          this._context?.globalState.get<Record<string, unknown>>("providerConfig") ?? {};
-        const vsConfig = vscode.workspace.getConfiguration("codewhale");
-        // Merge: VS Code settings take precedence, globalState is fallback
-        const config: Record<string, unknown> = {};
-        config.providerName = vsConfig.get<string>("providerName", "") || stored.providerName || "";
-        config.apiKey = vsConfig.get<string>("apiKey", "") || stored.apiKey || "";
-        config.baseUrl = vsConfig.get<string>("baseUrl", "") || stored.baseUrl || "";
-        this._postToWebview({ type: "providerConfig", config });
-        break;
-      }
-
-      case "compactThread": {
-        if (!client) return;
-        try {
-          const result = await client.compactThread(msg.threadId as string);
-          if (result.ok) {
-            this._postToWebview({ type: "contextCompacted", threadId: msg.threadId });
-            // Fetch real token count from backend — compaction reduces context
-            this._fetchUsage(msg.threadId as string);
-          }
-        } catch (err) {
-          this._postToWebview({
-            type: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-        break;
-      }
-
-      case "pickFiles": {
-        const kind = (msg.kind as string) ?? "both";
-        const files = await vscode.window.showOpenDialog({
-          canSelectFiles: kind !== "folder",
-          canSelectFolders: kind !== "files",
-          canSelectMany: true,
-          openLabel: "Add to context",
-          title: kind === "folder" ? "Add folder to context" : kind === "files" ? "Add files to context" : "Add files or folders to context",
-        });
-        if (files && files.length > 0) {
-          const contextFiles = files.map((uri) => {
-            let type: "file" | "dir" = "file";
-            try {
-              type = fs.statSync(uri.fsPath).isDirectory() ? "dir" : "file";
-            } catch {
-              // fallback to file
-            }
-            return { path: uri.fsPath, type };
-          });
-          this._postToWebview({
-            type: "contextFilesUpdated",
-            files: contextFiles,
-          });
-        }
-        break;
-      }
+    const handler = this._msgHandlers[msg.type as string];
+    if (handler) {
+      await handler.call(this, msg);
+    } else {
+      console.warn("[CodeWhale] unknown webview message type:", msg.type);
     }
   }
+
+  private readonly _msgHandlers: Record<string, (this: ChatPanelProvider, msg: Record<string, unknown>) => Promise<void>> = {
+    init: async function (_msg) {
+      const client = this._client;
+      this._postToWebview({ type: "connectionState", state: client ? "connected" : "connecting" });
+      if (client) this._sendThreadList(client);
+    },
+
+    newThread: async function (msg) {
+      const client = this._client;
+      if (!client) return;
+      try {
+        const mode = (msg.mode as string) ??
+          vscode.workspace.getConfiguration("codewhale").get<string>("defaultMode", "agent");
+        const workspace = this._currentWorkspace();
+        console.log("[CodeWhale] creating thread...");
+        const thread = await client.createThread({ mode, auto_approve: mode === "yolo", workspace });
+        console.log("[CodeWhale] thread created:", thread.id);
+        this._postToWebview({ type: "threadCreated", thread });
+        this._switchToThread(thread.id);
+      } catch (err) {
+        console.error("[CodeWhale] createThread failed:", err);
+        this._postToWebview({ type: "error", message: this._errorMsg(err) });
+      }
+    },
+
+    listThreads: async function () {
+      const client = this._client;
+      if (client) this._sendThreadList(client);
+    },
+
+    searchThreads: async function (msg) {
+      const client = this._client;
+      if (!client) return;
+      try {
+        const search = (msg.search as string) || undefined;
+        const workspace = this._currentWorkspace();
+        const threads = await client.listThreadSummaries(50, search, workspace);
+        const filtered = threads.filter((t) => !this._deletedThreadIds.has(t.id));
+        this._postToWebview({ type: "threadList", threads: filtered });
+      } catch { /* best-effort */ }
+    },
+
+    selectThread: async function (msg) {
+      this._loadAndSwitchThread(msg.threadId as string);
+    },
+
+    sendPrompt: async function (msg) {
+      const client = this._client;
+      if (!client || !this._activeThreadId) {
+        console.log("[CodeWhale] sendPrompt ignored — no client or thread");
+        return;
+      }
+      try {
+        console.log("[CodeWhale] starting turn for thread:", this._activeThreadId);
+        await client.startTurn(this._activeThreadId, { prompt: msg.prompt as string });
+        console.log("[CodeWhale] turn started, waiting for SSE events...");
+      } catch (err) {
+        console.error("[CodeWhale] startTurn failed:", err);
+        this._postToWebview({ type: "error", message: this._errorMsg(err) });
+      }
+    },
+
+    cancelTurn: async function (msg) {
+      const client = this._client;
+      if (!client) return;
+      try {
+        await client.cancelTurn(msg.threadId as string, msg.turnId as string);
+      } catch (err) {
+        console.error("[CodeWhale] cancelTurn failed:", err);
+      }
+    },
+
+    forkThread: async function (msg) {
+      const client = this._client;
+      if (!client) return;
+      try {
+        const forked = await client.forkThread(msg.threadId as string);
+        console.log("[CodeWhale] thread forked:", forked.id);
+        this._postToWebview({ type: "threadCreated", thread: forked });
+        this._switchToThread(forked.id);
+      } catch (err) {
+        console.error("[CodeWhale] forkThread failed:", err);
+        this._postToWebview({ type: "error", message: this._errorMsg(err) });
+      }
+    },
+
+    approvalDecision: async function (msg) {
+      const client = this._client;
+      if (!client) return;
+      try {
+        await client.submitApproval(msg.approvalId as string, {
+          decision: msg.decision as string,
+          remember: msg.remember as boolean | undefined,
+        });
+      } catch (err) {
+        this._postToWebview({ type: "error", message: this._errorMsg(err) });
+      }
+    },
+
+    viewDiff: async function (msg) {
+      vscode.commands.executeCommand("codewhale.viewDiff", {
+        filePath: msg.filePath as string,
+        diffText: msg.diffText as string,
+      });
+    },
+
+    renameThread: async function (msg) {
+      const client = this._client;
+      if (!client) return;
+      try {
+        const threadId = msg.threadId as string;
+        const title = msg.title as string;
+        await client.updateThread(threadId, { title });
+        this._postToWebview({ type: "threadRenamed", threadId, title });
+        this._sendThreadList(client);
+      } catch (err) {
+        this._postToWebview({ type: "error", message: this._errorMsg(err) });
+      }
+    },
+
+    deleteThread: async function (msg) {
+      const client = this._client;
+      if (!client) return;
+      const threadId = msg.threadId as string;
+      console.log("[CodeWhale] deleteThread requested:", threadId);
+      this._deletedThreadIds.add(threadId);
+      this._persistDeleted();
+      this._postToWebview({ type: "threadDeleted", threadId });
+      if (this._activeThreadId === threadId) {
+        this._sseAbort?.abort();
+        this._sseAbort = null;
+        this._activeThreadId = null;
+        this._postToWebview({ type: "activeThread", threadId: null });
+      }
+      this._sendThreadList(client);
+      this._deleteFromServer(client, threadId);
+    },
+
+    saveProviderConfig: async function (msg) {
+      const providerConfig = msg.config as Record<string, unknown>;
+      this._context?.globalState.update("providerConfig", providerConfig);
+      this._postToWebview({ type: "providerConfigSaved", config: providerConfig });
+      this.onConfigChanged?.();
+    },
+
+    getProviderConfig: async function () {
+      const stored = this._context?.globalState.get<Record<string, unknown>>("providerConfig") ?? {};
+      const vsConfig = vscode.workspace.getConfiguration("codewhale");
+      const config: Record<string, unknown> = {};
+      config.providerName = vsConfig.get<string>("providerName", "") || stored.providerName || "";
+      config.apiKey = vsConfig.get<string>("apiKey", "") || stored.apiKey || "";
+      config.baseUrl = vsConfig.get<string>("baseUrl", "") || stored.baseUrl || "";
+      this._postToWebview({ type: "providerConfig", config });
+    },
+
+    compactThread: async function (msg) {
+      const client = this._client;
+      if (!client) return;
+      try {
+        const result = await client.compactThread(msg.threadId as string);
+        if (result.ok) {
+          this._postToWebview({ type: "contextCompacted", threadId: msg.threadId });
+          this._fetchUsage(msg.threadId as string);
+        }
+      } catch (err) {
+        this._postToWebview({ type: "error", message: this._errorMsg(err) });
+      }
+    },
+
+    pickFiles: async function (msg) {
+      const kind = (msg.kind as string) ?? "both";
+      const files = await vscode.window.showOpenDialog({
+        canSelectFiles: kind !== "folder",
+        canSelectFolders: kind !== "files",
+        canSelectMany: true,
+        openLabel: "Add to context",
+        title: kind === "folder" ? "Add folder to context" : kind === "files" ? "Add files to context" : "Add files or folders to context",
+      });
+      if (files && files.length > 0) {
+        const contextFiles = files.map((uri) => {
+          let type: "file" | "dir" = "file";
+          try { type = fs.statSync(uri.fsPath).isDirectory() ? "dir" : "file"; } catch { /* fallback */ }
+          return { path: uri.fsPath, type };
+        });
+        this._postToWebview({ type: "contextFilesUpdated", files: contextFiles });
+      }
+    },
+  };
 
   // ── Thread switching ──────────────────────────────────────
 
@@ -458,73 +407,86 @@ export class ChatPanelProvider {
     this._startSseStream(threadId);
   }
 
+  // SSE event handlers stored as instance properties for clean removal
+  private _onSseEvent = (ev: SseEventEnvelope) => {
+    console.log("[CodeWhale SSE]", ev.event, ev.item_id);
+    this._postToWebview({ type: "sseEvent", event: ev });
+
+    // After a turn completes, fetch real token usage from REST API
+    if (ev.event === "turn.completed" && this._client) {
+      this._fetchUsage(ev.thread_id);
+    }
+  };
+
+  private _onSseError = (err: Error) => {
+    console.error("[CodeWhale SSE error]", err.message);
+  };
+
+  private _onSseEnd = () => {
+    console.log("[CodeWhale SSE] stream ended");
+    this._postToWebview({
+      type: "connectionState",
+      state: "disconnected",
+    });
+  };
+
   private _startSseStream(threadId: string) {
     const client = this._client;
     if (!client) return;
 
-    // Remove old listeners to prevent accumulation across thread switches
-    client.removeAllListeners("event");
-    client.removeAllListeners("error");
-    client.removeAllListeners("end");
+    // Remove previous listeners before re-subscribing
+    client.off("event", this._onSseEvent);
+    client.off("error", this._onSseError);
+    client.off("end", this._onSseEnd);
 
     this._sseAbort = client.streamEvents(threadId);
-    client.on("event", (ev: SseEventEnvelope) => {
-      console.log("[CodeWhale SSE]", ev.event, ev.item_id);
-      this._postToWebview({ type: "sseEvent", event: ev });
-
-      // After a turn completes, fetch real token usage from REST API
-      if (ev.event === "turn.completed" && this._client) {
-        this._fetchUsage(ev.thread_id);
-      }
-    });
-    client.on("error", (err: Error) => {
-      console.error("[CodeWhale SSE error]", err.message);
-    });
-    client.on("end", () => {
-      console.log("[CodeWhale SSE] stream ended");
-      this._postToWebview({
-        type: "connectionState",
-        state: "disconnected",
-      });
-    });
+    client.on("event", this._onSseEvent);
+    client.on("error", this._onSseError);
+    client.on("end", this._onSseEnd);
   }
 
   // ── Helpers ───────────────────────────────────────────────
 
-  /** After a turn completes, fetch real token usage from REST API and send to webview. */
+  /** After a turn completes, fetch real token usage from REST API. */
   private async _fetchUsage(threadId: string) {
     const client = this._client;
     if (!client) return;
 
-    // Small delay so the server has time to finalize usage accounting
-    await new Promise((r) => setTimeout(r, 300));
-
-    try {
-      const detail = await client.getThread(threadId);
-      const turns = detail.turns as Array<{ usage?: { input_tokens: number; output_tokens: number; cached_tokens?: number; reasoning_tokens?: number; cost_usd?: number } }>;
-      if (!turns || turns.length === 0) return;
-
-      let totalInput = 0;
-      let totalOutput = 0;
-      let totalCost = 0;
-      for (const turn of turns) {
-        if (turn.usage) {
-          totalInput += turn.usage.input_tokens;
-          totalOutput += turn.usage.output_tokens;
-          totalCost += turn.usage.cost_usd ?? 0;
+    // Poll until the latest turn has finalized (no longer in_progress)
+    const deadline = Date.now() + 10_000;
+    let turns: TurnRecord[] = [];
+    while (Date.now() < deadline) {
+      try {
+        const detail = await client.getThread(threadId);
+        turns = (detail.turns as TurnRecord[]) ?? [];
+        const latest = turns[turns.length - 1];
+        if (latest && latest.status !== "in_progress" && latest.status !== "queued") {
+          break;
         }
+      } catch {
+        break; // can't fetch, exit early
       }
+      await new Promise((r) => setTimeout(r, 200));
+    }
 
-      if (totalInput + totalOutput > 0) {
-        this._postToWebview({
-          type: "threadUsage",
-          threadId,
-          tokens: totalInput + totalOutput,
-          cost: Math.round(totalCost * 10000) / 10000,
-        });
+    let totalInput = 0;
+    let totalOutput = 0;
+    let totalCost = 0;
+    for (const turn of turns) {
+      if (turn.usage) {
+        totalInput += turn.usage.input_tokens;
+        totalOutput += turn.usage.output_tokens;
+        totalCost += turn.usage.cost_usd ?? 0;
       }
-    } catch {
-      // best-effort — estimation remains visible in webview
+    }
+
+    if (totalInput + totalOutput > 0) {
+      this._postToWebview({
+        type: "threadUsage",
+        threadId,
+        tokens: totalInput + totalOutput,
+        cost: Math.round(totalCost * 10000) / 10000,
+      });
     }
   }
 

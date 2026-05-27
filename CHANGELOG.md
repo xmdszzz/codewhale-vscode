@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.3 — 2026-05-28
+
+### Fixed
+- Extension host: replace `require()` with top-level ES imports for node built-ins
+- Extension host: remove download progress listener after server start (potential leak)
+- Extension host: null-safe manager access with local reference capture
+- Commands: persist approval mode index in globalState across reloads
+- Commands: `newThread` now auto-opens the chat panel
+- Commands: diff parse failure now includes the file path in error message
+- HTTP client: explicit `"utf8"` encoding in Content-Length header
+- HTTP client: timeout error message now includes method and path
+- HTTP client: `getThread` returns `TurnRecord[]` instead of `unknown[]`
+- Process manager: `restart()` polls port release instead of hardcoded 500ms sleep
+- Process manager: `stop()` waits for graceful shutdown response before force-kill
+- Process manager: clean up old CodewhaleClient listeners before creating new instance
+- Diff parser: eliminate duplicate regex in hunk header parsing
+- Diff parser: `reverseApply` uses in-place splice (O(n) instead of O(n*hunks))
+- Webview bridge: decompose 250+ line `_handleMessage` into dispatch map with 16 handlers
+- Webview bridge: replace hardcoded 300ms delay with turn-status polling in `_fetchUsage`
+- Webview bridge: use named SSE handlers with precise `off()` instead of `removeAllListeners`
+- Webview bridge: warn on dropped postMessage (silent failure when panel is null)
+
 ## 0.1.2 — 2026-05-27
 
 ### Added

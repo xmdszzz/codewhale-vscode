@@ -8,6 +8,7 @@ import {
   ThreadSummary,
   UpdateThreadRequest,
   StartTurnRequest,
+  TurnRecord,
   SseEventEnvelope,
   ApprovalDecisionRequest,
   ModelEntry,
@@ -61,7 +62,7 @@ export class CodewhaleClient extends EventEmitter {
           method,
           headers: {
             ...headers,
-            ...(payload ? { "Content-Length": String(Buffer.byteLength(payload)) } : {}),
+            ...(payload ? { "Content-Length": String(Buffer.byteLength(payload, "utf8")) } : {}),
           },
         },
         (res) => {
@@ -84,7 +85,7 @@ export class CodewhaleClient extends EventEmitter {
       );
       req.on("error", reject);
       req.setTimeout(30_000, () => {
-        req.destroy(new Error("Request timeout"));
+        req.destroy(new Error(`Request timeout: ${method} ${path} (30s)`));
       });
       if (payload) req.write(payload);
       req.end();
@@ -127,7 +128,7 @@ export class CodewhaleClient extends EventEmitter {
 
   async getThread(
     id: string
-  ): Promise<{ thread: ThreadRecord; turns: unknown[] }> {
+  ): Promise<{ thread: ThreadRecord; turns: TurnRecord[] }> {
     return this.request("GET", `/v1/threads/${id}`);
   }
 
